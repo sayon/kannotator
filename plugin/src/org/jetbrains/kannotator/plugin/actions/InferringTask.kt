@@ -33,6 +33,8 @@ import com.intellij.openapi.progress.PerformInBackgroundOption
 import org.jetbrains.kannotator.controlFlow.builder.analysis.MUTABILITY_KEY
 import org.jetbrains.kannotator.controlFlow.builder.analysis.NULLABILITY_KEY
 import org.jetbrains.kannotator.runtime.annotations.AnalysisType
+import org.jetbrains.kannotator.NO_ERROR_HANDLING
+import org.jetbrains.kannotator.simpleErrorHandler
 
 data class InferringTaskParams(
         val inferNullabilityAnnotations: Boolean,
@@ -40,6 +42,7 @@ data class InferringTaskParams(
         val addAnnotationsRoots: Boolean,
         val removeOtherRoots: Boolean,
         val outputPath: String,
+        val useOneCommonTree: Boolean,
         val libJarFiles: Map<Library, Set<File>>)
 
 public class InferringTask(val taskProject: Project, val taskParams: InferringTaskParams) :
@@ -148,7 +151,13 @@ public class InferringTask(val taskProject: Project, val taskParams: InferringTa
 
     private fun processFiles(outputDirectory: VirtualFile, inferringProgressIndicator: InferringProgressIndicator) {
         for ((lib, files) in taskParams.libJarFiles) {
-            val libOutputDir = createOutputDirectory(lib, outputDirectory)
+
+            val libOutputDir =
+                    if (taskParams.useOneCommonTree)
+                        outputDirectory
+                    else
+                        createOutputDirectory(lib, outputDirectory)
+
             val libIoOutputDir = VfsUtilCore.virtualToIoFile(libOutputDir)
 
             for (file in files) {
@@ -172,7 +181,7 @@ public class InferringTask(val taskProject: Project, val taskParams: InferringTa
                             FileBasedClassSource(arrayListOf(file)), ArrayList<File>(),
                             inferrerMap,
                             inferringProgressIndicator,
-                            false,
+                            NO_ERROR_HANDLING,
                             false,
                             hashMapOf(NULLABILITY_KEY to AnnotationsImpl<NullabilityAnnotation>(), MUTABILITY_KEY to AnnotationsImpl<MutabilityAnnotation>()),
                             hashMapOf(NULLABILITY_KEY to AnnotationsImpl<NullabilityAnnotation>(), MUTABILITY_KEY to AnnotationsImpl<MutabilityAnnotation>()),
@@ -202,7 +211,10 @@ public class InferringTask(val taskProject: Project, val taskParams: InferringTa
                             null,
                             libIoOutputDir,
                             inferredNullabilityAnnotations,
-                            propagatedNullabilityPositions)
+                            propagatedNullabilityPositions,
+                            simpleErrorHandler {
+                                kind, message -> throw IllegalArgumentException(message)
+                            })
 
                     inferringProgressIndicator.savingFinished()
                 } catch (e: OutOfMemoryError) {
@@ -221,10 +233,13 @@ public class InferringTask(val taskProject: Project, val taskParams: InferringTa
 
     private fun createOutputDirectory(library: Library, outputDirectory: VirtualFile): VirtualFile {
         return runComputableInsideWriteAction {
-            val libraryDirName = library.getName() ?: "no-name"
-
-            // Drop directory if it already exist
-            outputDirectory.findChild(libraryDirName)?.delete(this@InferringTask)
+            val libraryDirName = library.getName()?.replaceAll("[\\/:*?\"<>|]", "_") ?: "no-name"
+            // Drop directory if it already exists.
+            // We should not do that when flushing everything into the same directory tree, otherwise we can delete
+            // something important left from previous libraries.
+            if (!taskParams.useOneCommonTree) {
+               outputDirectory.findChild(libraryDirName)?.delete(this@InferringTask)
+            }
 
             outputDirectory.createChildDirectory(this@InferringTask, libraryDirName)
         }
