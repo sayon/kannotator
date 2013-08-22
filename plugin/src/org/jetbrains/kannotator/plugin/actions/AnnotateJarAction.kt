@@ -9,6 +9,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VfsUtilCore
 import kotlinlib.toMap
 import org.jetbrains.kannotator.plugin.actions.dialog.InferAnnotationDialog
+import org.jetbrains.kannotator.annotations.io.AnnotationsFormat
 
 public class AnnotateJarAction: AnAction() {
     public override fun actionPerformed(e: AnActionEvent?) {
@@ -18,17 +19,18 @@ public class AnnotateJarAction: AnAction() {
     public fun annotateJars(project: Project) {
         val dlg = InferAnnotationDialog(project)
         if (dlg.showAndGet()) {
-            val params = InferringTaskParams(
+            val params = InferringPluginParams(
                     inferNullabilityAnnotations = dlg.shouldInferNullabilityAnnotations(),
                     inferKotlinAnnotations = dlg.shouldInferKotlinAnnotations(),
                     outputPath = dlg.getConfiguredOutputPath(),
                     libJarFiles = dlg.getCheckedLibToJarFiles().map { it.key to it.value.map { file -> VfsUtilCore.virtualToIoFile(file) }.toSet() }.toMap(),
                     addAnnotationsRoots = dlg.shouldAddAnnotationsRoots(),
                     useOneCommonTree = dlg.useOneCommonTree(),
-                    removeOtherRoots = dlg.shouldRemoveAllOtherRoots()
+                    removeOtherRoots = dlg.shouldRemoveAllOtherRoots(),
+                    outputFormat=AnnotationsFormat.XML
             )
 
-            ProgressManager.getInstance().run(InferringTask(project, params))
+            ProgressManager.getInstance().run(PluginInferringTask(project, params))
         }
     }
 }
