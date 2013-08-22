@@ -191,7 +191,7 @@ public final class IndexFileParser {
     private String expectIdentifier() throws IOException, ParseException {
         String id = matchIdentifier();
         if (id == null) {
-            throw new ParseException("Expected an identifier");
+            throw new ParseException("Expected an identifier at line " + st.lineno());
         }
         return id;
     }

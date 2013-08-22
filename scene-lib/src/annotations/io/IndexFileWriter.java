@@ -10,6 +10,7 @@ import annotations.el.*;
 import annotations.ext.TypePathEntry;
 import annotations.field.*;
 import annotations.util.Strings;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.*;
 import java.lang.annotation.Retention;
@@ -273,7 +274,7 @@ public final class IndexFileWriter {
         }
     }
 
-
+    @NotNull
     /**
      * Classes representations in alphabetical order (sorted by canonical names)
      */
