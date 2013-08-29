@@ -37,6 +37,7 @@ import org.jetbrains.kannotator.annotations.io.AnnotationDataImpl
 import org.jetbrains.kannotator.runtime.annotations.AnalysisType
 import org.jetbrains.kannotator.ErrorHandler
 import java.io.Reader
+import org.jetbrains.kannotator.graphs.Node
 
 
 private fun List<AnnotationNode?>.extractAnnotationDataMapTo(annotationsMap: MutableMap<String, AnnotationData>) {
@@ -53,15 +54,6 @@ private fun List<AnnotationNode?>.extractAnnotationDataMapTo(annotationsMap: Mut
         className to AnnotationDataImpl(className, attributes)}
 }
 
-private fun <K: AnalysisType> loadAnnotations(
-        annotationFiles: Collection<File>,
-        keyIndex: AnnotationKeyIndex,
-        methodNodes: Map<Method, MethodNode>,
-        inferrers: Map<K, AnnotationInferrer<Any, Qualifier>>,
-        errorHandler: ErrorHandler
-): Map<K, MutableAnnotations<Any>> =
-        loadExternalAnnotations(loadMethodAnnotationsFromByteCode(methodNodes, inferrers),
-                annotationFiles map { {FileReader(it)} }, keyIndex, inferrers, errorHandler)
 
 trait AnnotationInferrer<A: Any, I: Qualifier> {
     fun resolveAnnotation(classNames: Map<String, AnnotationData>): A?
@@ -97,7 +89,6 @@ fun <K: AnalysisType> inferAnnotations(
         inferrers: Map<K, AnnotationInferrer<Any, Qualifier>>,
         progressMonitor: ProgressMonitor = ProgressMonitor(),
         errorHandler: ErrorHandler,
-        loadOnly: Boolean = false,
         propagationOverrides: Map<K, Annotations<Any>>,
         existingAnnotations: Map<K, Annotations<Any>>,
         packageIsInteresting: (String) -> Boolean,
@@ -106,60 +97,22 @@ fun <K: AnalysisType> inferAnnotations(
 ): InferenceResult<K> {
     progressMonitor.processingStarted()
 
-    val methodNodes = HashMap<Method, MethodNode>()
-    val declarationIndex = DeclarationIndexImpl(classSource, {
-        method ->
-        val methodNode = method.createMethodNodeStub()
-        methodNodes[method] = methodNode
-        methodNode
-    })
-
-    progressMonitor.annotationIndexLoaded(declarationIndex)
-
-    val loadedAnnotationsMap = loadAnnotations(existingAnnotationFiles, declarationIndex, methodNodes, inferrers, errorHandler)
-    val filteredLoadedAnnotationsMap = loadedAnnotationsMap.mapValues { (key, loadedAnn) ->
-        val positionsToExclude = existingPositionsToExclude[key]
-
-        if (positionsToExclude == null || positionsToExclude.empty) loadedAnn
-        else {
-            val newAnn = AnnotationsImpl<Any>(loadedAnn.delegate)
-
-            loadedAnn.forEach { (pos, ann) ->
-                if (pos !in positionsToExclude) newAnn[pos] = ann
-            }
-
-            newAnn
-        }
-    }
-
-    val resultingAnnotationsMap = filteredLoadedAnnotationsMap.mapValues {(key, ann) -> AnnotationsImpl<Any>(ann)}
-    for (key in inferrers.keySet()) {
-        val inferrerExistingAnnotations = existingAnnotations[key]
-        if (inferrerExistingAnnotations != null) {
-            resultingAnnotationsMap[key]!!.copyAllChanged(inferrerExistingAnnotations)
-        }
-    }
-
-    val inferenceResult = InferenceResult(
-            inferrers.mapValues { (key, inferrer) ->
-                InferenceResultGroup<Any>(
-                        loadedAnnotationsMap[key]!!,
-                        resultingAnnotationsMap[key]!!,
-                        HashSet<AnnotationPosition>()
-                )
-            }
+    val loaded = loadAnnotationsForInferring(
+            classSource,
+            existingAnnotationFiles,
+            inferrers,
+            progressMonitor,
+            errorHandler,
+            existingAnnotations,
+            existingPositionsToExclude
     )
 
-    if (loadOnly) {
-        return inferenceResult
-    }
+    val fieldToDependencyInfosMap = buildFieldsDependencyInfos(loaded.declarationIndex, classSource)
 
-    val fieldToDependencyInfosMap = buildFieldsDependencyInfos(declarationIndex, classSource)
-
-    val declarationIndexWithDependencies = DeclarationIndexImpl(declarationIndex)
-    val methodGraphBuilder = FunDependencyGraphBuilder(declarationIndex, classSource, fieldToDependencyInfosMap) {
+    val declarationIndexWithDependencies = DeclarationIndexImpl(loaded.declarationIndex)
+    val methodGraphBuilder = FunDependencyGraphBuilder(loaded.declarationIndex, classSource, fieldToDependencyInfosMap) {
         m ->
-        if (!loadAnnotationsForDependency(resultingAnnotationsMap, m, declarationIndexWithDependencies)) {
+        if (!loadAnnotationsForDependency(loaded.resultingAnnotationsMap, m, declarationIndexWithDependencies)) {
             errorHandler.warning("Method called but not present in the code: " + m)
         }
         null
@@ -183,24 +136,50 @@ fun <K: AnalysisType> inferAnnotations(
 
     for ((key, inferrer) in inferrers) {
         for (fieldInfo in fieldToDependencyInfosMap.values()) {
-            resultingAnnotationsMap[key]!!.copyAllChanged(inferrer.inferAnnotationsFromFieldValue(fieldInfo.field))
+            loaded.resultingAnnotationsMap[key]!!.copyAllChanged(inferrer.inferAnnotationsFromFieldValue(fieldInfo.field))
         }
     }
 
-    progressMonitor.methodsProcessingStarted(methodNodes.size)
+    progressMonitor.methodsProcessingStarted(loaded.methodNodes.size)
 
-    for (component in components) {
-        val methods = component.map { Pair(it.data, it.incomingEdges) }.toMap()
-        progressMonitor.processingComponentStarted(methods.keySet())
+    components.forEach {
+        processComponent(it,
+                declarationIndexWithDependencies,
+                loaded.methodNodes,
+                loaded.resultingAnnotationsMap,
+                fieldToDependencyInfosMap,
+                inferrers,
+                progressMonitor
+        )
+        // We don't need to occupy that memory any more
+        for (functionNode in it) {
+            loaded.methodNodes.remove(functionNode.data)
+        }
+    }
+    progressMonitor.processingFinished()
 
-        fun dependentMembersInsideThisComponent(method: Method): Collection<Method> {
-            // Add itself as inferred annotation can produce more annotations
+    return propagateAnnotations(inferrers, loaded.inferenceResult, propagationOverrides, methodHierarchy)
+}
+
+private fun <K : AnalysisType> processComponent(component: Set<Node<Method, String>>,
+                                                declarationIndexWithDependencies: DeclarationIndex,
+                                                methodNodes: Map<Method, MethodNode>,
+                                                resultingAnnotationsMap: Map<K, AnnotationsImpl<Any>>,
+                                                fieldToDependencyInfosMap: Map<Field, FieldDependencyInfo>,
+                                                inferrers: Map<K, AnnotationInferrer<Any, Qualifier>>,
+                                                progressMonitor: ProgressMonitor
+) {
+    val methods = component.map { Pair(it.data, it.incomingEdges) }.toMap()
+    progressMonitor.processingComponentStarted(methods.keySet())
+
+    fun dependentMembersInsideThisComponent(method: Method): Collection<Method> {
+        // Add itself as inferred annotation can produce more annotations
             methods.keySet().intersect(methods.getOrThrow(method).map {e -> e.from.data}).plus(method)
         }
 
-        for (method in methods.keySet()) {
-            loadMethodParameterNames(method, methodNodes[method]!!)
-        }
+    for (method in methods.keySet()) {
+        loadMethodParameterNames(method, methodNodes[method]!!)
+    }
 
         inferAnnotationsOnMutuallyRecursiveMethods(
                 declarationIndexWithDependencies,
@@ -214,16 +193,6 @@ fun <K: AnalysisType> inferAnnotations(
         )
 
         progressMonitor.processingComponentFinished(methods.keySet())
-
-        // We don't need to occupy that memory any more
-        for (functionNode in component) {
-            methodNodes.remove(functionNode.data)
-        }
-    }
-
-    progressMonitor.processingFinished()
-
-    return propagateAnnotations(inferrers, inferenceResult, propagationOverrides, methodHierarchy)
 }
 
 private fun <K: AnalysisType> propagateAnnotations(

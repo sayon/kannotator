@@ -40,7 +40,6 @@ abstract class AbstractInferenceTest<A: Annotation>(val testClass: Class<*>) : T
                 hashMapOf(Pair(analysisType, getInferrer() as AnnotationInferrer<Any, Qualifier>)),
                 ProgressMonitor(),
                 NO_ERROR_HANDLING,
-                false,
                 hashMapOf(analysisType to AnnotationsImpl<A>()),
                 hashMapOf(analysisType to annotations),
                 {true},

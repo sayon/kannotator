@@ -42,7 +42,6 @@ class InferenceWithDependenciesTest : TestCase() {
                 inferrerMap,
                 ProgressMonitor(),
                 NO_ERROR_HANDLING,
-                false,
                 mapOf(NULLABILITY_KEY to AnnotationsImpl<NullabilityAnnotation>()),
                 mapOf(NULLABILITY_KEY to AnnotationsImpl<NullabilityAnnotation>()),
                 {true},
