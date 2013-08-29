@@ -38,16 +38,6 @@ import org.jetbrains.kannotator.runtime.annotations.AnalysisType
 import org.jetbrains.kannotator.ErrorHandler
 import java.io.Reader
 
-open class ProgressMonitor {
-    open fun processingStarted() {}
-    open fun annotationIndexLoaded(index: AnnotationKeyIndex) {}
-    open fun methodsProcessingStarted(methodCount: Int) {}
-    open fun processingComponentStarted(methods: Collection<Method>) {}
-    open fun processingStepStarted(method: Method) {}
-    open fun processingStepFinished(method: Method) {}
-    open fun processingComponentFinished(methods: Collection<Method>) {}
-    open fun processingFinished() {}
-}
 
 private fun List<AnnotationNode?>.extractAnnotationDataMapTo(annotationsMap: MutableMap<String, AnnotationData>) {
     this.filterNotNull().toMutableMap(annotationsMap){node ->
@@ -61,117 +51,6 @@ private fun List<AnnotationNode?>.extractAnnotationDataMapTo(annotationsMap: Mut
         }
 
         className to AnnotationDataImpl(className, attributes)}
-}
-
-public fun <K: AnalysisType> loadMethodAnnotationsFromByteCode(
-        methodNodes: Map<Method, MethodNode>,
-        inferrers: Map<K, AnnotationInferrer<Any, Qualifier>>
-): Map<K, Annotations<Any>> {
-    val internalAnnotationsMap = inferrers.mapValues { entry -> AnnotationsImpl<Any>() }
-
-    for ((method, methodNode) in methodNodes) {
-
-        PositionsForMethod(method).forEachValidPosition {
-            position ->
-            val declPos = position.relativePosition
-            val annotationsMap =
-            when (declPos) {
-                RETURN_TYPE -> {
-                    val annotationsMap = HashMap<String, AnnotationData>()
-                    methodNode.visibleAnnotations?.extractAnnotationDataMapTo(annotationsMap)
-                    methodNode.invisibleAnnotations?.extractAnnotationDataMapTo(annotationsMap)
-                    annotationsMap
-                }
-                is ParameterPosition -> {
-                    val annotationsMap = HashMap<String, AnnotationData>()
-                    val index = if (method.isStatic()) declPos.index else declPos.index - 1
-                    if (methodNode.visibleParameterAnnotations != null && index < methodNode.visibleParameterAnnotations!!.size) {
-                        methodNode.visibleParameterAnnotations!![index]?.filterNotNull()?.extractAnnotationDataMapTo(annotationsMap)
-                    }
-
-                    if (methodNode.invisibleParameterAnnotations != null && index < methodNode.invisibleParameterAnnotations!!.size) {
-                        methodNode.invisibleParameterAnnotations!![index]?.filterNotNull()?.extractAnnotationDataMapTo(annotationsMap)
-                    }
-                    annotationsMap
-                }
-                else -> Collections.emptyMap<String, AnnotationData>()
-            }
-
-            if (!annotationsMap.empty) {
-                for ((inferrerKey, inferrer) in inferrers) {
-                    val internalAnnotations = internalAnnotationsMap[inferrerKey]!!
-                    val annotation = inferrer.resolveAnnotation(annotationsMap)
-                    if (annotation != null) {
-                        internalAnnotations[position] = annotation
-                    }
-                }
-            }
-        }
-
-    }
-
-    return internalAnnotationsMap
-}
-
-public fun <K: AnalysisType> loadFieldAnnotationsFromByteCode(
-        fieldNodes: Map<Field, FieldNode>,
-        inferrers: Map<K, AnnotationInferrer<Any, Qualifier>>
-): Map<K, Annotations<Any>> {
-    val internalAnnotationsMap = inferrers.mapValues { entry -> AnnotationsImpl<Any>() }
-
-    for ((field, node) in fieldNodes) {
-        val position = getFieldTypePosition(field)
-
-        val annotationsMap = HashMap<String, AnnotationData>()
-        node.visibleAnnotations?.extractAnnotationDataMapTo(annotationsMap)
-        node.invisibleAnnotations?.extractAnnotationDataMapTo(annotationsMap)
-
-        if (!annotationsMap.empty) {
-            for ((inferrerKey, inferrer) in inferrers) {
-                val internalAnnotations = internalAnnotationsMap[inferrerKey]!!
-                val annotation = inferrer.resolveAnnotation(annotationsMap)
-                if (annotation != null) {
-                    internalAnnotations[position] = annotation
-                }
-            }
-        }
-
-    }
-
-    return internalAnnotationsMap
-}
-
-public fun <K: AnalysisType> loadExternalAnnotations(
-        delegatingAnnotations: Map<K, Annotations<Any>>,
-        annotationsInXml: Collection<() -> Reader>,
-        keyIndex: AnnotationKeyIndex,
-        inferrers: Map<K, AnnotationInferrer<Any, Qualifier>>,
-        errorHandler: ErrorHandler
-): Map<K, MutableAnnotations<Any>> {
-    val externalAnnotationsMap = inferrers.mapValues { (key, inferrer) -> AnnotationsImpl<Any>(delegatingAnnotations[key]) }
-
-    for (xml in annotationsInXml) {
-        xml() use {
-            parseAnnotations(it, {
-                key, annotations ->
-                val position = keyIndex.findPositionByAnnotationKeyString(key)
-                if (position != null) {
-                    val classNames = annotations.toMap({data -> data.annotationClassFqn to data})
-                    for ((inferrerKey, inferrer) in inferrers) {
-                        val externalAnnotations = externalAnnotationsMap[inferrerKey]!!
-                        val annotation = inferrer.resolveAnnotation(classNames)
-                        if (annotation != null) {
-                            externalAnnotations[position] = annotation
-                        }
-                    }
-                } else {
-                    errorHandler.error("Position not found for $key")
-                }
-            }, errorHandler)
-        }
-    }
-
-    return externalAnnotationsMap
 }
 
 private fun <K: AnalysisType> loadAnnotations(
@@ -226,7 +105,7 @@ fun <K: AnalysisType> inferAnnotations(
         loadAnnotationsForDependency: (Map<K, MutableAnnotations<Any>>, ClassMember, DeclarationIndexImpl) -> Boolean = {_, __, ___ -> false}
 ): InferenceResult<K> {
     progressMonitor.processingStarted()
-    
+
     val methodNodes = HashMap<Method, MethodNode>()
     val declarationIndex = DeclarationIndexImpl(classSource, {
         method ->
