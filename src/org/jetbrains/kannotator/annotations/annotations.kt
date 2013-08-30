@@ -18,13 +18,17 @@ public fun <A: Any> MutableAnnotations<A>.setIfNotNull(position: AnnotationPosit
     }
 }
 
-public fun <A: Any> MutableAnnotations<A>.copyAllChanged(
+public fun <A: Any> MutableAnnotations<A>.copyAllChanged (
         annotations: Annotations<A>,
-        merger: (pos: AnnotationPosition, previous: A?, new: A) -> A = { pos, previous, new -> new }) {
+        merger: (pos: AnnotationPosition, previous: A?, new: A) -> A = { pos, previous, new -> new }
+): Boolean {
+    var changed = false
     annotations.forEach { pos, ann ->
         val previous = this[pos]
         if (previous != ann) {
+            changed = true
             this[pos] = merger(pos, previous, ann)
         }
     }
+    return changed
 }
