@@ -23,7 +23,7 @@ data class LoadedAnnotations<K: AnalysisType>(
         val resultingAnnotationsMap: Map<K, AnnotationsImpl<Any>>
 )
 
-fun <K: AnalysisType> loadAnnotationsForInferring(
+fun <K: AnalysisType> loadAnnotations(
         classSource: ClassSource,
         existingAnnotationFiles: Collection<File>,
         inferrers: Map<K, AnnotationInferrer<Any, Qualifier>>,

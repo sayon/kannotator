@@ -5,8 +5,6 @@ import java.io.FileReader
 import java.util.HashMap
 import java.util.LinkedHashSet
 import kotlinlib.*
-import org.jetbrains.kannotator.annotations.io.parseAnnotations
-import org.jetbrains.kannotator.asm.util.createMethodNodeStub
 import org.jetbrains.kannotator.declarations.*
 import org.jetbrains.kannotator.index.AnnotationKeyIndex
 import org.jetbrains.kannotator.index.DeclarationIndex
@@ -21,24 +19,17 @@ import org.objectweb.asm.tree.AnnotationNode
 import org.objectweb.asm.Type
 import org.jetbrains.kannotator.index.ClassSource
 import java.io.BufferedReader
-import org.objectweb.asm.tree.FieldNode
 import org.jetbrains.kannotator.index.loadMethodParameterNames
-import org.jetbrains.kannotator.classHierarchy.buildClassHierarchyGraph
-import org.jetbrains.kannotator.classHierarchy.buildMethodHierarchy
 import org.jetbrains.kannotator.annotationsInference.propagation.*
 import org.jetbrains.kannotator.controlFlow.builder.analysis.*
 import org.jetbrains.kannotator.annotationsInference.engine.*
 import org.jetbrains.kannotator.funDependecy.*
-import org.jetbrains.kannotator.graphs.dependencyGraphs.PackageDependencyGraphBuilder
-import org.jetbrains.kannotator.graphs.removeGraphNodes
 import org.jetbrains.kannotator.classHierarchy.HierarchyGraph
 import org.jetbrains.kannotator.annotations.io.AnnotationData
 import org.jetbrains.kannotator.annotations.io.AnnotationDataImpl
 import org.jetbrains.kannotator.runtime.annotations.AnalysisType
 import org.jetbrains.kannotator.ErrorHandler
-import java.io.Reader
 import org.jetbrains.kannotator.graphs.Node
-
 
 private fun List<AnnotationNode?>.extractAnnotationDataMapTo(annotationsMap: MutableMap<String, AnnotationData>) {
     this.filterNotNull().toMutableMap(annotationsMap){node ->
@@ -52,27 +43,6 @@ private fun List<AnnotationNode?>.extractAnnotationDataMapTo(annotationsMap: Mut
         }
 
         className to AnnotationDataImpl(className, attributes)}
-}
-
-
-trait AnnotationInferrer<A: Any, I: Qualifier> {
-    fun resolveAnnotation(classNames: Map<String, AnnotationData>): A?
-
-    fun inferAnnotationsFromFieldValue(field: Field): Annotations<A>
-
-    fun <Q: Qualifier> inferAnnotationsFromMethod(
-            method: Method,
-            methodNode: MethodNode,
-            analysisResult: AnalysisResult<QualifiedValueSet<Q>>,
-            fieldDependencyInfoProvider: (Field) -> FieldDependencyInfo,
-            declarationIndex: DeclarationIndex,
-            annotations: Annotations<A>): Annotations<A>
-
-    val lattice: AnnotationLattice<A>
-    val qualifierSet: QualifierSet<I>
-
-    fun getFrameTransformer(annotations: Annotations<A>, declarationIndex: DeclarationIndex): FrameTransformer<QualifiedValueSet<*>>
-    fun getQualifierEvaluator(positions: PositionsForMethod, annotations: Annotations<A>, declarationIndex: DeclarationIndex): QualifierEvaluator<I>
 }
 
 data class InferenceResultGroup<A: Any>(
@@ -95,9 +65,10 @@ fun <K: AnalysisType> inferAnnotations(
         existingPositionsToExclude: Map<K, Set<AnnotationPosition>>,
         loadAnnotationsForDependency: (Map<K, MutableAnnotations<Any>>, ClassMember, DeclarationIndexImpl) -> Boolean = {_, __, ___ -> false}
 ): InferenceResult<K> {
+
     progressMonitor.processingStarted()
 
-    val loaded = loadAnnotationsForInferring(
+    val loaded = loadAnnotations(
             classSource,
             existingAnnotationFiles,
             inferrers,
@@ -108,31 +79,21 @@ fun <K: AnalysisType> inferAnnotations(
     )
 
     val fieldToDependencyInfosMap = buildFieldsDependencyInfos(loaded.declarationIndex, classSource)
-
     val declarationIndexWithDependencies = DeclarationIndexImpl(loaded.declarationIndex)
-    val methodGraphBuilder = FunDependencyGraphBuilder(loaded.declarationIndex, classSource, fieldToDependencyInfosMap) {
-        m ->
-        if (!loadAnnotationsForDependency(loaded.resultingAnnotationsMap, m, declarationIndexWithDependencies)) {
-            errorHandler.warning("Method called but not present in the code: " + m)
-        }
-        null
-    }
 
-    val methodGraph = methodGraphBuilder.build()
+    val graphs = buildCodeStructureGraphs(loaded,
+            classSource,
+            fieldToDependencyInfosMap,
+            packageIsInteresting,
+            { if (!loadAnnotationsForDependency(loaded.resultingAnnotationsMap, it, declarationIndexWithDependencies)) {
+                    errorHandler.warning("Method called but not present in the code: $it")
+                }
+                null
+            }
+    )
 
-    val packageGraphBuilder = PackageDependencyGraphBuilder(methodGraph)
-    val packageGraph = packageGraphBuilder.build()
 
-    val nonInterestingNodes = packageGraph.nodes subtract packageGraph.getTransitivelyInterestingNodes { packageIsInteresting(it.data.name) }
-    packageGraphBuilder.removeGraphNodes {it in nonInterestingNodes}
-
-    val classHierarchy = buildClassHierarchyGraph(classSource)
-    val methodHierarchy = buildMethodHierarchy(classHierarchy)
-    packageGraphBuilder.extendWithHierarchy(methodHierarchy)
-
-    methodGraphBuilder.removeGraphNodes { packageGraph.findNode(Package(it.data.packageName)) == null }
-
-    val components = methodGraph.getTopologicallySortedStronglyConnectedComponents().reverse()
+    val components = graphs.methodGraph.getTopologicallySortedStronglyConnectedComponents().reverse()
 
     for ((key, inferrer) in inferrers) {
         for (fieldInfo in fieldToDependencyInfosMap.values()) {
@@ -158,7 +119,7 @@ fun <K: AnalysisType> inferAnnotations(
     }
     progressMonitor.processingFinished()
 
-    return propagateAnnotations(inferrers, loaded.inferenceResult, propagationOverrides, methodHierarchy)
+    return propagateAnnotations(inferrers, loaded.inferenceResult, propagationOverrides, graphs.methodHierarchy)
 }
 
 private fun <K : AnalysisType> processComponent(component: Set<Node<Method, String>>,
@@ -181,18 +142,18 @@ private fun <K : AnalysisType> processComponent(component: Set<Node<Method, Stri
         loadMethodParameterNames(method, methodNodes[method]!!)
     }
 
-        inferAnnotationsOnMutuallyRecursiveMethods(
-                declarationIndexWithDependencies,
-                resultingAnnotationsMap,
-                methods.keySet(),
-                { classMember -> dependentMembersInsideThisComponent(classMember) },
-                { m -> methodNodes.getOrThrow(m) },
-                { f -> fieldToDependencyInfosMap.getOrThrow(f) },
-                inferrers,
-                progressMonitor
-        )
+    inferAnnotationsOnMutuallyRecursiveMethods(
+            declarationIndexWithDependencies,
+            resultingAnnotationsMap,
+            methods.keySet(),
+            { classMember -> dependentMembersInsideThisComponent(classMember) },
+            { m -> methodNodes.getOrThrow(m) },
+            { f -> fieldToDependencyInfosMap.getOrThrow(f) },
+            inferrers,
+            progressMonitor
+    )
 
-        progressMonitor.processingComponentFinished(methods.keySet())
+    progressMonitor.processingComponentFinished(methods.keySet())
 }
 
 private fun <K: AnalysisType> propagateAnnotations(
